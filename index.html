@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>CSV Viewer — Search, Edit & Export</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+assets/favicon.svg
+<style>
+  :root{ --bg:#0b0c10; --panel:#111318; --muted:#222733; --text:#e6eaf2; --sub:#9aa4b2; --accent:#5aa9e6; --bad:#ef4444; --radius:12px; }
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .app{max-width:1200px;margin:0 auto;padding:16px}
+  .card{background:var(--panel);border:1px solid var(--muted);border-radius:var(--radius);padding:16px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  label{font-size:12px;color:var(--sub);display:block;margin-bottom:6px}
+  input[type="text"],input[type="search"],input[type="file"],select,textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--muted);background:#0f1218;color:var(--text);outline:none}
+  button{appearance:none;border:none;border-radius:999px;padding:10px 16px;background:var(--accent);color:#001b2e;font-weight:600;cursor:pointer}
+  button.secondary{background:#1b2230;color:var(--text);border:1px solid var(--muted)}
+  button.warn{background:var(--bad);color:#fff}
+  .hint{color:var(--sub);font-size:12px}
+  .pill{display:inline-block;padding:4px 10px;border-radius:999px;background:#1b2230;color:var(--text);border:1px solid var(--muted);font-size:12px}
+  .table-wrap{position:relative;overflow:auto;border:1px solid var(--muted);border-radius:12px}
+  table{border-collapse:separate;border-spacing:0;width:100%;min-width:900px}
+  thead th{position:sticky;top:0;background:#111520;z-index:2;color:#dce3ee;border-bottom:1px solid var(--muted)}
+  th,td{padding:10px 12px;border-bottom:1px solid #172033;vertical-align:top;white-space:pre-wrap;word-break:break-word}
+  tbody tr:hover{background:#0f1522}
+  thead .filter{padding:6px}
+  .th-sort{cursor:pointer;user-select:none}
+  .th-sort .dir{opacity:.6;margin-left:6px}
+  .toolbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .toolbar .right{display:flex;gap:8px;flex-wrap:wrap}
+  .pagination{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:8px}
+  @media (max-width:480px){ th,td{padding:10px} .toolbar .right{width:100%} }
+  .toast{position:fixed;left:16px;right:16px;bottom:16px;display:none;padding:12px;border-radius:12px;background:#1b2230;border:1px solid var(--muted)}
+  .toast.show{display:block}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1 style="margin:0 0 6px 0">📄 CSV Viewer</h1>
+  <div class="hint">Upload CSV → search, edit, and export. Optimized for iPhone & desktop.</div>
+
+  <div class="card" style="margin-top:12px">
+    <div class="toolbar">
+      <div class="row">
+        <div>
+          <label for="fileInput">Upload CSV</label>
+          <input id="fileInput" type="file" accept=".csv,text/csv" />
+        </div>
+        <div>
+          <label>Global Search</label>
+          <input id="globalSearch" type="search" placeholder="Type and press Enter or click Search" />
+        </div>
+        <div class="row">
+          <button id="applySearch">Search</button>
+          <button id="resetFilters" class="secondary">Reset</button>
+        </div>
+      </div>
+      <div class="right">
+        <span id="meta" class="pill">No file loaded</span>
+        <button id="addRowBtn" class="secondary" disabled>Add Row</button>
+        <button id="downloadCsv" class="secondary" disabled>Download CSV</button>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table id="dataTable" aria-live="polite">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="pagination">
+      <span class="hint" id="countInfo"></span>
+      <div class="row">
+        <button id="prevPage" class="secondary">Prev</button>
+        <span id="pageInfo" class="pill">–</span>
+        <button id="nextPage" class="secondary">Next</button>
+        <label style="display:flex;align-items:center;gap:6px">
+          <span class="hint">Rows/page</span>
+          <select id="pageSize">
+            <option>25</option><option selected>50</option><option>100</option><option>250</option><option>500</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"><strong>Note:</strong> <span id="toastMsg"></span></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const fileInput = $('fileInput'), globalSearch = $('globalSearch'), applySearch = $('applySearch'),
+        resetFilters = $('resetFilters'), addRowBtn = $('addRowBtn'), downloadCsv = $('downloadCsv'),
+        meta = $('meta'), thead = $('thead'), tbody = $('tbody'),
+        pageInfo = $('pageInfo'), countInfo = $('countInfo'), prevPage = $('prevPage'),
+        nextPage = $('nextPage'), pageSizeSel = $('pageSize'), toast = $('toast'), toastMsg = $('toastMsg');
+
+  let headers = [], rows = [], filtered = [], sortCol = null, sortDir = 1, page = 1, pageSize = 50;
+  let columnFilterInputs = [];
+  const toText = v => (v==null ? '' : String(v));
+  const escapeHtml = s => s.replace(/[&<>"']/g, m=>({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[m]));
+  const escapeAttr = s => escapeHtml(s).replace(/\n/g,'&#10;');
+  const showToast = (msg)=>{ toastMsg.textContent = msg; toast.classList.add('show'); setTimeout(()=>toast.classList.remove('show'), 4000); };
+
+  function parseCSV(text){
+    const out = []; let i=0, s = text.replace(/^\uFEFF/,''); let row=[], field='', inQuotes=false;
+    const pushField=()=>{ row.push(field); field='';}, pushRow=()=>{ out.push(row); row=[]; };
+    while(i<s.length){ const ch=s[i];
+      if(inQuotes){ if(ch==='"'){ if(s[i+1]==='"'){ field+='"'; i+=2; } else { inQuotes=false; i++; } }
+        else { field+=ch; i++; } }
+      else { if(ch==='"'){ inQuotes=true; i++; }
+        else if(ch===','){ pushField(); i++; }
+        else if(ch==='\r'){ if(s[i+1]==='\n') i+=2; else i++; pushField(); pushRow(); }
+        else if(ch==='\n'){ i++; pushField(); pushRow(); }
+        else { field+=ch; i++; } } }
+    pushField(); pushRow();
+    while(out.length && out[out.length-1].every(v => String(v).trim()==='')) out.pop();
+    return out;
+  }
+
+  function buildFiltersUI(){
+    thead.innerHTML=''; const tr1=document.createElement('tr'), tr2=document.createElement('tr');
+    headers.forEach((h,idx)=>{
+      const th=document.createElement('th'); th.className='th-sort'; th.tabIndex=0; th.title='Click to sort';
+      th.addEventListener('click',()=>toggleSort(idx));
+      th.innerHTML=`<span>${escapeHtml(h)}</span><span class="dir">${sortCol===idx?(sortDir>0?'▲':'▼'):''}</span>`; tr1.appendChild(th);
+      const thF=document.createElement('th'); thF.className='filter';
+      const input=document.createElement('input'); input.type='text'; input.placeholder='Filter…'; input.dataset.col=idx;
+      thF.appendChild(input); tr2.appendChild(thF);
+    });
+    const thAct=document.createElement('th'); thAct.textContent='Actions'; tr1.appendChild(thAct);
+    const thAct2=document.createElement('th'); tr2.appendChild(thAct2);
+    thead.appendChild(tr1); thead.appendChild(tr2);
+    columnFilterInputs=[...tr2.querySelectorAll('input')];
+    columnFilterInputs.forEach(inp=>inp.addEventListener('keydown',e=>{ if(e.key==='Enter') applyFilters(); }));
+  }
+
+  function renderTable(){
+    const total=filtered.length, pages=Math.max(1,Math.ceil(total/pageSize));
+    if(page>pages) page=pages; const start=(page-1)*pageSize, end=Math.min(total,start+pageSize);
+    const slice=filtered.slice(start,end); tbody.innerHTML='';
+    slice.forEach((r,idx)=>{
+      const tr=document.createElement('tr');
+      headers.forEach(h=>{ const td=document.createElement('td'); td.textContent=toText(r[h]); tr.appendChild(td); });
+      const tdAct=document.createElement('td'); const btn=document.createElement('button'); btn.className='secondary'; btn.textContent='Edit';
+      btn.addEventListener('click',()=>openEdit(start+idx)); tdAct.appendChild(btn); tr.appendChild(tdAct); tbody.appendChild(tr);
+    });
+    pageInfo.textContent=`Page ${page}/${Math.max(1,Math.ceil(total/pageSize))}`;
+    countInfo.textContent=total?`${(start+1).toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}`:'0 rows';
+  }
+
+  function applyFilters(){
+    const global=globalSearch.value.trim().toLowerCase(), perCol=columnFilterInputs.map(inp=>inp.value.trim().toLowerCase());
+    filtered=rows.filter(r=>{
+      for(let i=0;i<headers.length;i++){ const needle=perCol[i]; if(needle){ const v=toText(r[headers[i]]).toLowerCase(); if(!v.includes(needle)) return false; } }
+      if(global){ const joined=headers.map(h=>toText(r[h])).join(' | ').toLowerCase(); if(!joined.includes(global)) return false; }
+      return true;
+    });
+    sortNow(); page=1; renderTable(); updateMeta();
+  }
+  function toggleSort(idx){ if(sortCol===idx) sortDir=-sortDir; else { sortCol=idx; sortDir=1; } buildFiltersUI(); applyFilters(); }
+  function sortNow(){ if(sortCol==null) return; const key=headers[sortCol];
+    filtered.sort((a,b)=>{ const aa=toText(a[key]).toLowerCase(), bb=toText(b[key]).toLowerCase(); return aa<bb?-1*sortDir:aa>bb?1*sortDir:0; }); }
+
+  let editingIndex=-1;
+  function openEdit(filteredIdx){
+    editingIndex=filteredIdx; const data=filtered[filteredIdx];
+    const fields=headers.map(h=>{
+      const val=toText(data[h]);
+      const control=(val.length>60||/\n/.test(val))?`<textarea name="${escapeAttr(h)}" rows="3">${escapeHtml(val)}</textarea>`
+                                                  :`<input name="${escapeAttr(h)}" type="text" value="${escapeAttr(val)}">`;
+      return `<div style="display:flex;flex-direction:column;gap:6px"><label style="color:#9aa4b2;font-size:12px">${escapeHtml(h)}</label>${control}</div>`;
+    }).join('');
+    const html=`
+      <div class="card" style="position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:9999;max-width:min(720px,95vw);width:95vw">
+        <h3 style="margin:0 0 12px 0">Edit Row #${(rows.indexOf(data)+1)}</h3>
+        <form id="editForm" class="grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">${fields}</form>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+          <button id="deleteRow" class="warn">Delete</button>
+          <button id="cancelEdit" class="secondary">Cancel</button>
+          <button id="saveEdit">Save</button>
+        </div>
+      </div>`;
+    const wrap=document.createElement('div'); wrap.id='modalWrap';
+    Object.assign(wrap.style,{position:'fixed',inset:'0',background:'rgba(0,0,0,.5)',zIndex:'9998'}); wrap.innerHTML=html; document.body.appendChild(wrap);
+    $('cancelEdit').onclick=()=>closeEdit();
+    $('saveEdit').onclick=(e)=>{ e.preventDefault(); saveEditHandler(); };
+    $('deleteRow').onclick=(e)=>{ e.preventDefault(); deleteRowHandler(); };
+  }
+  function closeEdit(){ const w=$('modalWrap'); if(w) w.remove(); }
+  function saveEditHandler(){ if(editingIndex<0) return; const data=filtered[editingIndex]; const updated={...data};
+    document.querySelectorAll('#editForm input,#editForm textarea').forEach(inp=>{ updated[inp.name]=inp.value??''; });
+    const globalIdx=rows.indexOf(data); rows[globalIdx]=updated; filtered[editingIndex]=updated; closeEdit(); renderTable(); }
+  function deleteRowHandler(){ if(editingIndex<0) return; const data=filtered[editingIndex]; const globalIdx=rows.indexOf(data);
+    if(globalIdx>=0) rows.splice(globalIdx,1); applyFilters(); closeEdit(); }
+
+  function addRow(){ const blank={}; headers.forEach(h=>blank[h]=''); rows.push(blank); applyFilters();
+    const idx=rows.length-1; const filteredIdx=filtered.indexOf(rows[idx]); if(filteredIdx>=0) openEdit(filteredIdx); }
+  function updateMeta(){ meta.textContent=rows.length?`${filtered.length} shown / ${rows.length} rows`:'No file loaded'; }
+
+  function exportCSV(){
+    const lines=[], q=(val)=>{ const s=toText(val); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; };
+    lines.push(headers.map(q).join(',')); rows.forEach(r=>lines.push(headers.map(h=>q(r[h])).join(',')));
+    const blob=new Blob([lines.join('\r\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download=`export_${new Date().toISOString().slice(0,10)}.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  }
+
+  applySearch.addEventListener('click',applyFilters);
+  globalSearch.addEventListener('keydown',e=>{ if(e.key==='Enter') applyFilters(); });
+  resetFilters.addEventListener('click',()=>{ globalSearch.value=''; columnFilterInputs.forEach(i=>i.value=''); sortCol=null; sortDir=1; buildFiltersUI(); applyFilters(); });
+  pageSizeSel.addEventListener('change',()=>{ pageSize=parseInt(pageSizeSel.value,10)||50; renderTable(); });
+  prevPage.addEventListener('click',()=>{ if(page>1){ page--; renderTable(); }});
+  nextPage.addEventListener('click',()=>{ const max=Math.max(1,Math.ceil(filtered.length/pageSize)); if(page<max){ page++; renderTable(); }});
+  addRowBtn.addEventListener('click',addRow);
+  downloadCsv.addEventListener('click',exportCSV);
+
+  fileInput.addEventListener('change',async (e)=>{
+    const f=e.target.files?.[0]; if(!f) return;
+    const name=(f.name||'').toLowerCase();
+    if(!name.endsWith('.csv')) showToast('This page supports CSV only. For Excel, open index_xlsx.html');
+
+    try{
+      const text=await f.text(); const matrix=parseCSV(text); if(!matrix.length) throw new Error('Empty CSV');
+      headers=matrix[0].map((h,i)=>(i===0?String(h).replace(/^\uFEFF/,''):String(h)).trim()); while(headers.length && headers[headers.length-1]==='') headers.pop();
+      rows=matrix.slice(1).map(r=>{ const obj={}; headers.forEach((h,i)=> obj[h]=toText(r[i]??'')); return obj; });
+
+      addRowBtn.disabled=false; downloadCsv.disabled=false;
+      buildFiltersUI(); filtered=[...rows]; page=1; pageSize=parseInt(pageSizeSel.value,10)||50;
+      renderTable(); updateMeta();
+    }catch(err){
+      console.error(err); meta.textContent='No file loaded'; tbody.innerHTML=''; thead.innerHTML='';
+      addRowBtn.disabled=true; downloadCsv.disabled=true; showToast('Could not parse CSV. Share a small sample if it persists.');
+    }
+  });
+})();
+</script>
+</body>
+</html>
